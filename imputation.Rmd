@@ -1,0 +1,390 @@
+---
+title: "Cleaning, Imputation and Some Feature Engineering"
+author: "Jacinto"
+date: "September 12, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```
+TODO
+  Combine as much levels as possible for the features
+
+```
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(caret)
+```
+# Import Data
+```{r}
+load('data/raw_data.RData')
+```
+
+
+Missingness and imputation decision are made from the training set, but the imputation is done on the whole data. Currently working on 2017 only.   
+
+# Before Imputation Summary
+```{r}
+summary(prop_2017)
+```
+
+# Find the features that are majority missing, redundant, or not useful 
+```{r}
+exclude_features1 <- c('buildingclasstypeid',
+                      'basementsqft',
+                      'storytypeid',
+                      'fireplaceflag',
+                      'architecturalstyletypeid',
+                      'typeconstructiontypeid',
+                      'decktypeid',
+                      'finishedsquarefeet15',
+                      'finishedfloor1squarefeet',
+                      'poolcnt',
+                      'propertyzoningdesc',
+                      'censustractandblock',
+                      'parcelid',
+                      'regionidcounty',
+                      'numberofstories',
+                      'regionidneighborhood',
+                      'regionidcity',
+                      'yardbuildingsqft26',
+                      'yardbuildingsqft17',
+                      'fireplacecnt')
+```
+
+# Imputing missing values 
+## Create flags for missing  
+```{r}
+prop_2017 <- prop_2017 %>% 
+  mutate(hasunitcntflag = is.na(unitcnt),
+         hasbuildingqualityfalg = is.na(buildingqualitytypeid))
+```
+
+
+## Simple Impute. Convert NA to single value
+```{r}
+# Using the most common value
+prop_2017$assessmentyear[which(is.na(prop_2017$assessmentyear))] <- 2016
+prop_2017$propertycountylandusecode[which(is.na(prop_2017$propertycountylandusecode))] <- '0100'
+prop_2017$unitcnt[which(is.na(prop_2017$unitcnt))] <- 1
+```
+
+
+```{r}
+na_zero <- c('finishedsquarefeet13',
+             'finishedsquarefeet6', 'poolsizesum',
+             'taxdelinquencyyear',
+             'finishedsquarefeet50', 'fireplacecnt',
+             'threequarterbathnbr', 'pooltypeid7',
+             'garagecarcnt', 'garagetotalsqft',
+             'finishedsquarefeet12', 'calculatedbathnbr',
+             'fullbathcnt')
+for(f in na_zero){
+  prop_2017[[f]][is.na(prop_2017[[f]])] <- 0
+}
+  
+na_logic <- c('pooltypeid10', 'pooltypeid2',
+              'taxdelinquencyflag', 'hashottuborspa')
+for(f in na_logic){
+  prop_2017[[f]][is.na(prop_2017[[f]])] <- FALSE
+}
+
+na_none <- c('airconditioningtypeid','heatingorsystemtypeid')
+for(f in na_none){
+  prop_2017[[f]][is.na(prop_2017[[f]])] <- 'None'
+}
+
+na_median <- c('calculatedfinishedsquarefeet', 'structuretaxvaluedollarcnt',
+               'bathroomcnt', 'bedroomcnt',
+               'roomcnt', 'taxamount',
+               'taxvaluedollarcnt', 'landtaxvaluedollarcnt',
+               'lotsizesquarefeet')
+for(f in na_median){
+  prop_2017[[f]][is.na(prop_2017[[f]])] <- median(prop_2017[[f]], na.rm = TRUE)
+}
+
+rm(na_zero, na_logic, na_none, na_median, f)
+```
+```{r}
+# prop_2017 %>% select(one_of(na_median)) %>% summary()
+```
+
+# Imputation  
+knn doesn't work because it uses too much space  
+
+```{r}
+remove_rows <- which(is.na(prop_2017$latitude))
+remove_parcelid <- prop_2017$parcelid[remove_rows]
+# The ones where latitdue and longitude is missing. The 2932 are basically all
+# empty without any information. 
+# Take them out and set them a constant value for submission.  
+prop_2017 <- prop_2017[-remove_rows,]
+
+```
+
+## Imputing Zip with distance  
+```{r}
+tmp_na <- which(is.na(prop_2017$regionidzip))
+prop_2017$regionidzip <- as.factor(prop_2017$regionidzip)
+
+# Create a small dataset for prototyping
+# This takes forever even with a small sample
+# k <- 10000
+# small <- sample(nrow(prop_2017)-length(tmp_na), k)
+# small_df <- prop_2017[-tmp_na, 
+#                       c('longitude','latitude', 'regionidzip')][small,] %>% 
+#   data.frame()
+# ctrl <- trainControl(method = 'LGOCV',
+#                      preProcOptions = c('center', 'scale'),
+#                      index = list(TrainSet = sample(k, as.integer(k*.1))))
+# 
+# regionidzip_model <- train(small_df[c(1,2)],
+#                            factor(small_df$regionidzip),
+#                            method = 'svmRadial',
+#                            trControl = ctrl)
+
+## Use distance instead of svm
+# Find the center of each zip
+zip_dist <- prop_2017[-tmp_na,] %>% 
+  select(longitude, latitude, regionidzip) %>% 
+  group_by(regionidzip) %>% 
+  summarize(center_long = mean(longitude),
+            center_lat = mean(latitude))
+
+# ggplot(zip_dist, aes(x = center_long, y = center_lat)) +
+#   geom_point(size = 0.8, color = 'blue') +
+#   geom_polygon(data = map_loc, 
+#                aes(x = long, y = lat, group = group),
+#                color = 'black', fill = NA)
+
+zip_na <- prop_2017[tmp_na, c('longitude','latitude')]
+# Calculate the distance between zip center
+# Then find the closest zip center and get zip
+zip_imp <- apply(flexclust::dist2(zip_dist[c(2,3)], zip_na), 2, which.min)
+zip_imp2 <- zip_dist[[1]][zip_imp]
+
+prop_2017$regionidzip <- as.character(prop_2017$regionidzip)
+prop_2017$regionidzip[tmp_na] <- as.character(zip_imp2)
+prop_2017$regionidzip <- factor(prop_2017$regionidzip)
+
+rm(zip_dist, zip_na, zip_imp, zip_imp2)
+```
+
+## Impute yearbuilt with average yearbuilt by zip  
+```{r}
+tmp_na <- which(is.na(prop_2017$yearbuilt))
+zip_year <- prop_2017 %>% 
+  group_by(regionidzip) %>% 
+  summarize(avg_year = as.integer(mean(yearbuilt, na.rm = T)))
+
+zip_year$regionidzip[is.na(zip_year$avg_year)] %>% as.character()
+# Some zip location has na
+# Impute with median 1963
+zip_year$avg_year[is.na(zip_year$avg_year)] <- median(zip_year$avg_year, na.rm = T)
+
+zip_year_dict <- zip_year$avg_year
+names(zip_year_dict) <- zip_year$regionidzip
+
+prop_2017$yearbuilt[tmp_na] <- zip_year_dict[as.character(prop_2017$regionidzip[tmp_na])]
+
+rm(zip_year, zip_year_dict)
+```
+
+
+## Random Imputation for buildingqualitytypeid to keep proportion  
+```{r}
+# Have a hasqualityflag so random should be fine
+# Assuming buildingqualitytypeid is missing at random
+tmp_na <- which(is.na(prop_2017$buildingqualitytypeid))
+set.seed(56)
+quality_imp <- sample(levels(prop_2017$buildingqualitytypeid), 
+                      length(tmp_na), replace = T,
+                      prob = as.double(prop.table(table(prop_2017$buildingqualitytypeid))))
+```
+```{r}
+prop_2017$buildingqualitytypeid[tmp_na] <- quality_imp
+quality_imp %>% table %>% prop.table()
+
+rm(quality_imp)
+```
+
+
+Check which features of interest are still missing values
+```{r}
+prop_2017 %>% 
+  select(one_of(setdiff(colnames(prop_2017), exclude_features1))) %>% 
+  sapply(FUN = function(x){sum(is.na(x))}) %>% 
+  .[. > 0] %>% sort()
+```
+
+
+# Simple feature Engineering 
+```{r}
+prop_2017 <- prop_2017 %>% 
+  mutate(hasdeckflag = !is.na(decktypeid),
+         haspoolflag = !is.na(poolcnt),
+         hasshedorpatioflag = (!is.na(yardbuildingsqft17) |
+                                !is.na(yardbuildingsqft26)))
+```
+
+# Features Level reduction  
+Many features has way too many levels and majority are in only a few  
+```{r}
+col_factor <- c("airconditioningtypeid", "buildingqualitytypeid",
+                "fips", "heatingorsystemtypeid",
+                "propertycountylandusecode", "propertylandusetypeid",
+                "propertylandusetypeid", "regionidzip")
+
+# Find the levels in each factor features 
+prop_2017 %>% 
+  select(one_of(col_factor)) %>% 
+  sapply(FUN = function(x){length(unique(x))})
+```
+## airconditioningtypeid  
+```{r}
+summary(prop_2017$airconditioningtypeid)
+```
+Combine all the others into 'Yes'. 
+```{r}
+tmp_index <- prop_2017$airconditioningtypeid %in% c('Chilled Water',
+                                                    'Evaporative Cooler',
+                                                    'Geo Thermal',
+                                                    'Other',
+                                                    'Packaged AC Unit',
+                                                    'Partial',
+                                                    'Ventilation',
+                                                    'Wall Unit',
+                                                    'Window Unit',
+                                                    'Refrigeration')
+prop_2017$airconditioningtypeid[tmp_index] <- 'Yes'
+# Drop unused levels 
+prop_2017$airconditioningtypeid <- droplevels(prop_2017$airconditioningtypeid)
+```
+```{r}
+summary(prop_2017$airconditioningtypeid)
+```
+Reduced the levels to three.  
+
+## buildingqualitytypeid  
+```{r}
+summary(prop_2017$buildingqualitytypeid)
+```
+Keep as is. Want to keep the order  
+
+## fips  
+Only has three so no need to reduce.  
+
+## heatingorsystemtypeid  
+```{r}
+summary(prop_2017$heatingorsystemtypeid)
+```
+Convert the minorities into 'Yes'  
+```{r}
+tmp_index <- !(prop_2017$heatingorsystemtypeid %in% c('Central',
+                                                       'Floor/Wall',
+                                                       'None',
+                                                       'Yes'))
+prop_2017$heatingorsystemtypeid[tmp_index] <- 'Yes'
+prop_2017$heatingorsystemtypeid <- droplevels(prop_2017$heatingorsystemtypeid)
+```
+```{r}
+summary(prop_2017$heatingorsystemtypeid)
+```
+
+## propertycountylandusecode  
+```{r}
+prop_2017$propertycountylandusecode %>% factor() %>% summary()
+```
+Anything less than 1% of the population will be combined into other  
+```{r}
+landusecode <- prop_2017$propertycountylandusecode %>% 
+  factor() %>% 
+  table %>% 
+  prop.table() %>% 
+  .[. > 0.01] %>% names()
+
+tmp_index <- !(prop_2017$propertycountylandusecode %in% landusecode)
+prop_2017$propertycountylandusecode[tmp_index] <- 'Other'
+prop_2017$propertycountylandusecode <- factor(prop_2017$propertycountylandusecode)
+```
+```{r}
+summary(prop_2017$propertycountylandusecode) %>% sort()
+rm(landusecode)
+```
+
+## propertylandusetypeid  
+```{r}
+summary(prop_2017$propertylandusetypeid)
+```
+Since the variables names has information. I can combined based on their similarity.  
+
+```{r}
+propertycountylandusecode <- droplevels(prop_2017$propertylandusetypeid) %>%
+  as.character()
+```
+
+```{r}
+# Create Variables All together because name is too long 
+# Turn into Single Family Residential
+tmp_index <- propertycountylandusecode %in% c('Single Family Residential',
+                        'Inferred Single Family Residential',
+                        'Residential General')
+propertycountylandusecode[tmp_index] <- 'singleFam'
+
+# Turn into Multiple Family Residential  
+tmp_index <- propertycountylandusecode %in% c('Duplex (2 Units, Any Combination)',
+                                             'Quadruplex (4 Units, Any Combination)',
+                                             'Triplex (3 Units, Any Combination)')
+propertycountylandusecode[tmp_index] <- 'multiFam'
+
+# Turn into Other type of homes  
+tmp_index <- propertycountylandusecode %in% c('Townhouse',
+                                              'Residential Common Area',
+                                              'Cluster Home',
+                                              'Mobile Home',
+                                              'Manufactured, Modular, Prefabricated Homes') 
+propertycountylandusecode[tmp_index] <- 'otherHome'
+
+# Turn into mix used 
+tmp_index <- propertycountylandusecode %in% c('Commercial/Office/Residential Mixed Used',
+                                              'Store/Office (Mixed Use)')
+propertycountylandusecode[tmp_index] <- 'mixUse'
+
+# rename 
+propertycountylandusecode[propertycountylandusecode == 'Planned Unit Development'] <- 'planned'
+propertycountylandusecode[propertycountylandusecode == 'Condominium'] <- 'condo'
+propertycountylandusecode[propertycountylandusecode == 'Cooperative'] <- 'coop'
+```
+```{r}
+prop_2017$propertylandusetypeid <- factor(propertycountylandusecode)
+```
+
+```{r}
+summary(prop_2017$propertylandusetypeid)
+```
+
+## regionidzip  
+I believe this variable has a lot of information therefore, keep as is  
+
+
+```{r}
+summary(prop_2017)
+```
+
+
+# Export Data
+```{r}
+# save(sample_sub,
+#      sample_sub_dates,
+#      prop_2017,
+#      train_2016,
+#      train_2017,
+#      map_loc,
+#      file = 'data/clean.RData')
+```
+

@@ -1,0 +1,243 @@
+---
+title: "model1"
+author: "Jacinto"
+date: "October 17, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r, warning=FALSE, echo = FALSE}
+library(tidyverse)
+library(magrittr)
+library(caret)
+library(h2o)
+```
+
+
+Missed the deadline for submission =(
+
+```{r}
+load('data/clean.RData')
+```
+# Exclude features
+```{r}
+exclude_features1 <- c('buildingclasstypeid',
+                      'basementsqft',
+                      'storytypeid',
+                      'fireplaceflag',
+                      'architecturalstyletypeid',
+                      'typeconstructiontypeid',
+                      'decktypeid',
+                      'finishedsquarefeet15',
+                      'finishedfloor1squarefeet',
+                      'poolcnt',
+                      'propertyzoningdesc',
+                      'censustractandblock',
+                      'regionidcounty',
+                      'numberofstories',
+                      'regionidneighborhood',
+                      'regionidcity',
+                      'yardbuildingsqft26',
+                      'yardbuildingsqft17',
+                      'fireplacecnt')
+```
+
+```{r}
+# Exclude during modeling
+ex_f2 <- c('parcelid',
+           'latitude',
+           'longitude',
+           'transactiondate',
+           'regionidzip',
+           'rawcensustractandblock')
+```
+
+
+# Setting up training data
+```{r}
+# Only weekdays seem useful
+train_2016 %<>% 
+  mutate(weekday = as.factor(weekdays(transactiondate)))
+train_2017 %<>% 
+  mutate(weekday = as.factor(weekdays(transactiondate)))
+```
+
+```{r}
+# Remove features that are not gonna be used
+prop_2017 <- prop_2017 %>% 
+  select(-one_of(exclude_features1))
+# Convert parcelid to match prop_2017 type
+train_2016$parcelid <- as.integer(train_2016$parcelid)
+train_2017$parcelid <- as.integer(train_2017$parcelid)
+```
+```{r}
+# Join logerror with properties features
+df_2016 <- left_join(train_2016, prop_2017, by = "parcelid")
+# There are 17 properties with all null for the features 
+tmp <- apply(df_2016, 1, FUN = function(x) any(is.na(x)))
+df_2016$parcelid[tmp]
+# Remove these samples 
+df_2016 <- df_2016[!tmp,]
+rm(tmp)
+```
+
+```{r}
+# Join logerror properties features 
+df_2017 <- left_join(train_2017, prop_2017, by = "parcelid")
+# There are 33 properties with all null for the features 
+tmp <- apply(df_2017, 1, FUN = function(x) any(is.na(x)))
+df_2017$parcelid[tmp]
+# Remove these samples 
+df_2017 <- df_2017[!tmp,]
+rm(tmp)
+```
+
+```{r}
+# Easy access of features names
+features <- names(df_2016) %>% sort()
+# Remove objects to save memory
+rm(exclude_features1, prop_2017, sample_sub, train_2016, train_2017,
+   sample_sub_dates)
+```
+
+Validation set 
+```{r}
+# Proportion for validation 
+k = 0.1
+set.seed(683)
+v_16_row <- sample(nrow(df_2016), floor(nrow(df_2016)*k))
+v_17_row <- sample(nrow(df_2017), floor(nrow(df_2017)*k))
+length(v_16_row)
+length(v_17_row)
+```
+```{r}
+v_16 <- df_2016[v_16_row, ]
+v_17 <- df_2016[v_17_row, ]
+```
+```{r}
+# Remove validation from training set
+df_2016 <- df_2016[-v_16_row, ]
+df_2017 <- df_2017[-v_17_row, ]
+```
+```{r}
+rm(v_16_row, v_17_row)
+```
+
+Because I missed the kaggle submission, I am gonna test on 2016 dataset from now on.   
+```{r}
+rm(v_17, df_2017)
+rownames(df_2016) <- c()
+rownames(v_16) <- c()
+```
+
+# Remove features with near zero variance 
+```{r}
+nz_f <- nearZeroVar(df_2016, names = TRUE)
+nz_f
+```
+
+# Simple median 
+Test the baseline for score with just median
+```{r}
+median_2016 <- median(df_2016$logerror)
+
+# Error from just predicting the median
+postResample(median_2016, v_16$logerror)
+rm(median_2016)
+```
+
+
+
+# Simple Linear Regresion
+```{r}
+trCtrl <- trainControl(method = 'cv',
+                       number = 5, 
+                       verboseIter = TRUE)
+
+train_df <- df_2016 %>% 
+  select(-one_of(c(ex_f2, nz_f, 'logerror'))) %>% 
+  as.data.frame()
+
+m_lm <- train(train_df,
+              df_2016$logerror,
+              method = 'lm',
+              preProcess = c('center', 'scale'),
+              trControl = trCtrl)
+```
+
+```{r}
+summary(m_lm)
+```
+```{r}
+pred_lm <- predict(m_lm, v_16)
+defaultSummary(data.frame(obs = v_16$logerror, pred = pred_lm))
+```
+Looks like simple linear regression is even worst than just guessing that everything is at the median. 
+
+# Random Forest  
+```{r}
+h2o.init(max_mem_size = "8G")
+```
+```{r}
+## export into csv 
+train_df$logerror <- df_2016$logerror
+write.csv(train_df, file = 'data/train_df.csv', row.names = FALSE)
+write.csv(v_16, file = 'data/v_16.csv', row.names = FALSE)
+
+# import into h2o
+train_df <- h2o.importFile('data/train_df.csv')
+v_16 <- h2o.importFile('data/v_16.csv')
+```
+
+```{r}
+# Dependent variable
+y <- "logerror"
+# Features used in random forest
+x <- setdiff(names(train_df), 
+             c("weekday", "C1", 
+               "buildingqualitytypeid",
+               y))
+```
+
+```{r}
+m_rf <- h2o.randomForest(x, y, train_df, nfolds = 0, model_id = "RF_defaults")
+```
+```{r}
+summary(m_rf)
+```
+
+```{r}
+h2o.performance(m_rf, v_16)
+```
+RF isn't as good a just using the median. 
+
+```{r}
+h2o.shutdown(prompt = FALSE)
+```
+
+Move on the more advance modeling and tuning. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

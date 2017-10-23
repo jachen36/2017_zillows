@@ -1,0 +1,37 @@
+---
+title: "deeper dive into missing values"
+author: "Jacinto"
+date: "September 12, 2017"
+output: html_document
+---
+
+```
+TODO:
+  GGally::ggpairs
+
+
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(VIM)
+library(forcats)
+```
+
+# Load Data 
+From simple_eda.Rmd
+```{r}
+# prop_train contains properties only from 2016 sales
+load('data/prop_train.RData')
+dim(prop_train)
+```
+
+```{r}
+
+```
+

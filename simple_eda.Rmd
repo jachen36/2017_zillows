@@ -1,0 +1,729 @@
+---
+title: "Simple Explorartory Analysis"
+author: "Jacinto"
+date: "September 6, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo = FALSE, message= FALSE, warning=FALSE}
+library(tidyverse)
+library(magrittr)
+library(VIM)
+library(XLConnect)
+library(forcats)
+library(BaylorEdPsych)
+library(maps)
+```
+
+
+# Load Data 
+```{r}
+# Contains all the properties with their home features for 2016. Note: Some 2017
+# new properties don't have any data yet except for their parcelid's. Those data
+# points should be populated when properties_2017.csv is available. 
+# 10/15/2017 started using properties_2017 instead of 2016 since they are the same
+# with updated information for 2017 houses.
+prop_2016 <- read_csv("data/properties_2017.csv",
+                      # col_types, every 5 cols
+                      col_types = paste0('iccid','dccdc',
+                                         'idiii', 'iicii',
+                                         'iilci','idiil',
+                                         'llccc','ccccc',
+                                         'dcici','iidil',
+                                         'ddidd','cic'))
+
+# Contains the training set with transactions from 1/1/2016 to 12/31/2016 
+train_2016 <- read_csv("data/train_2016_v2.csv",
+                       col_types = 'cnD')
+
+train_2017 <- read_csv("data/train_2017.csv",
+                       col_types = 'cnD')
+# Contains the a sample submission and also the test parcelids 
+# Asked to predict 6 time points: 201610, 201611, 201612, 201710, 201711, 201712 
+sample_sub <- read_csv("data/sample_submission.csv")
+sample_sub_dates <- names(sample_sub)[-1]
+sample_sub <- sample_sub[1]
+```
+
+```{r}
+# Check if there is any problems reading the data into R
+problems(prop_2016)
+problems(train_2016)
+problems(sample_sub)
+```
+
+## Convert to correct column types and relabeling factors 
+```{r}
+# double to integer
+tmp_col <- c('bedroomcnt','calculatedfinishedsquarefeet', 'roomcnt', 'yearbuilt')
+for (c in tmp_col){
+  prop_2016[[c]] <- as.integer(prop_2016[[c]])
+}
+
+# Change taxdelinquencyflag from Y to logic true
+prop_2016$taxdelinquencyflag <- prop_2016$taxdelinquencyflag == 'Y'
+
+# Read labels from data dictionary and use it to change factor's labels 
+data_dict <- loadWorkbook("data/zillow_data_dictionary.xlsx")
+
+tmp_col <- c("PropertyLandUseTypeID", "HeatingOrSystemTypeID",
+             "StoryTypeID", "AirConditioningTypeID",
+             "ArchitecturalStyleTypeID","TypeConstructionTypeID")
+
+for(c in tmp_col){
+  tmp_sheet <- readWorksheet(data_dict, c)
+  c <- tolower(c)
+  prop_2016[[c]] <- factor(prop_2016[[c]],
+                           levels = tmp_sheet[[1]],
+                           labels = tmp_sheet[[2]])
+}
+rm(data_dict, tmp_sheet, tmp_col)
+
+# Shorten description from data_dict
+prop_2016$buildingclasstypeid <- factor(prop_2016$buildingclasstypeid,
+                                        levels = 1:5,
+                                        labels = c("fireproofed steel",
+                                                   "fireproofed concrete",
+                                                   "firedproofed exterior",
+                                                   "wood plus steel frame",
+                                                   "other"))
+
+# External Labels 
+# Federal information processing standard code
+prop_2016$fips <- factor(prop_2016$fips,
+                         levels = c('06037', '06059', '06111'),
+                         labels = c('Los Angeles', 'Orange', 'Ventura'))
+
+# buildingqualitytypeid
+# overall assessment of condition of the building from best(lowest) to worst(higest)
+prop_2016$buildingqualitytypeid <- factor(prop_2016$buildingqualitytypeid,
+                                          levels = as.character(1:12),
+                                          labels = c('1best','2','3','4','5',
+                                                     '6mid','7','8','9','10',
+                                                     '11','12worst'),
+                                          ordered = TRUE)
+
+# the rest of the character columns are kept as if because:
+# too many levels, lack of information, save as if for later use. 
+# rawcensustractandblock = 100,300
+# regionidneighborhood = 529
+# regionidzip = 406
+# censustractandblock = 96772
+```
+
+```{r}
+# Scaling down the longitude and latitude
+prop_2016$longitude <- prop_2016$longitude/1000000
+prop_2016$latitude <- prop_2016$latitude/1000000
+```
+
+
+# Table's characteristics
+```{r}
+tmp_df <- list(prop_2016, train_2016, sample_sub)
+data.frame(table = c("prop_2016", "train_2016", "sample_sub"),
+           num_of_rows = sapply(tmp_df, 
+                                function(x) scales::comma(nrow(x))),
+           num_of_col = sapply(tmp_df, ncol),
+           # Faction of table is complete
+           comp_case_frac = sapply(tmp_df, function(x) sum(complete.cases(x))/nrow(x)), 
+           memory_mb = sapply(tmp_df,
+                              function(x) format(object.size(x), unit = "MB")),
+           stringsAsFactors = FALSE)
+rm(tmp_df)
+
+```
+
+# From this point on, looking only at houses in training_2016  
+Because it is the only data that is being used in the model so looking at the rest would be kind of cheating.  
+```{r}
+# Return only properties in train_2016
+prop_train <- prop_2016 %>% filter(parcelid %in% unique(train_2016$parcelid))
+
+# Properties that were sold more than once in the year 2016
+sold_multi <- train_2016$parcelid %>% table %>% (function(x) x[x > 1])
+# Most were sold twice while there is one that was sold thrice
+table(sold_multi)
+# The special property sold three times
+sold_multi[sold_multi > 2] %>% names()
+rm(sold_multi)
+```
+
+# Summary 
+```{r}
+summary(prop_train)
+```
+
+# Looking at Missing Values
+
+## Overview
+```{r}
+prop_miss <- aggr(prop_train, plot = F)
+
+# Calculate and sort the percentage of missing data per feature
+miss <- prop_miss$missings %>% 
+  mutate(Percent = round((Count/nrow(prop_miss$x))*100, digits = 3)) %>% 
+  arrange(desc(Percent))
+miss
+```
+
+## Most Common Pattern
+Only looking at a subset of the patterns because there are `r dim(prop_miss$tabcomb)[1]`.
+
+```{r}
+# Select only top # most common missing pattern
+top = 20
+
+# Convert matrix to data.frame 
+miss_pattern <- as.data.frame(prop_miss$tabcomb)
+# Extract column names and assign to data.frame
+names(miss_pattern) <- colnames(prop_miss$x)
+# Order the columns from most to least amount missing
+miss_pattern <- miss_pattern[, order(prop_miss$missings$Count, decreasing = T)]
+# Order the rows from most to least common pattern by percent
+miss_pattern_order <- order(prop_miss$percent, decreasing = T)
+miss_pattern <- miss_pattern[miss_pattern_order, ]
+# Only keeping the top# pattern
+miss_pattern <- miss_pattern[1:top,]
+# Index rows 
+miss_pattern$index <- 1:nrow(miss_pattern)
+# Format by gathering all columns but index
+miss_pattern %<>% gather(key = 'feature', value = 'missing', -index)
+
+ggplot(miss_pattern, aes(x = fct_inorder(feature), 
+                         y = factor(index), 
+                         fill = factor(missing, 
+                                       levels = c(1,0),
+                                       labels = c("Yes", "No")))) +
+  geom_tile(col = 'black') +
+  scale_fill_manual(values = c('No' = 'skyblue', 'Yes' = 'red')) +
+  labs(x = 'Features', y = 'Index', 
+       title = paste('Top', top, 'Missing Patterns'),
+       fill = 'Missing') +
+  theme(axis.text.x = element_text(angle = -90, hjust = 1, vjust = 0.5),
+        plot.title = element_text(size = 25, hjust = 0.5),
+        legend.position = 'top')
+```
+There does not seem to be an obvious pattern.  
+```{r}
+data.frame(index = as.factor(1:top), 
+           percent = round(prop_miss$percent[miss_pattern_order[1:top]], 1)) %>% 
+  ggplot(aes(x = index, y = percent)) +
+  geom_bar(stat = 'identity') +
+  geom_text(aes(label = percent), vjust = 1.5, color = 'white') +
+  labs(title = paste("Percentage of the Top", top, "Missing Pattern")) +
+  theme(plot.title = element_text(size = 20, hjust = 0.5))
+```
+
+
+```{r}
+barMiss(as.data.frame(prop_train[,c('fips', 'airconditioningtypeid')]))
+```
+
+```{r}
+cn_filter <- miss %>% filter(Percent < 50, Percent > 5) %$% Variable
+
+# prop_train %>% select(one_of(c('airconditioningtypeid', 'fips'))) %>% 
+#   as.data.frame %>% LittleMCAR()
+```
+
+
+```{r}
+map_loc <- map_data('county', region = 'california') %>% 
+  filter(subregion %in% c('los angeles', 'orange', 'ventura')) %>% 
+  # Adjustment to match the housing location better on map
+  mutate(lat = lat - 0.02, long = long - 0.02)
+
+
+ggplot(prop_train, aes(x = longitude, y = latitude, color = fips)) +
+  geom_point(alpha = 0.2) +
+  geom_polygon(data = map_loc, aes(x = long, y = lat, group = group),
+               fill = NA, color = 'black') +
+  labs(title = "Location of 2016 Properties Sold")
+```
+The few dots on the bottom of the map is Santa Catalina Island which is part of Los Angeles County.  
+
+## Airconiditioningtypeid
+```{r}
+no_ac <- prop_train %>% 
+  select(longitude, latitude, airconditioningtypeid) %>% 
+  mutate(hasAC = !(airconditioningtypeid %in% c(NA, 'None')))
+
+ggplot(no_ac, aes(x = longitude, y = latitude, color = hasAC)) +
+  geom_point(alpha = 0.1)+
+  geom_polygon(data = map_loc, aes(x = long, y = lat, group = group),
+               fill = NA, color = 'black') +
+  labs(title = "Has Air Condition")
+```
+It looks like NA is most likely properties without AC.  
+
+## buildingclasstypeid,  buildingqualitytypeid  
+```{r}
+table(prop_train$buildingclasstypeid, useNA = 'always')
+```
+Buildingclasstypeid doesn't seem to contain any information
+
+```{r}
+prop_train$buildingqualitytypeid %>% table(useNA = 'always')
+```
+```{r}
+prop_train %>% 
+  ggplot(aes(x = longitude, y = latitude, color = buildingqualitytypeid)) +
+  geom_point()
+```
+It looks there is some spatial relationship between buildingqualitytypeid with the property's location. This is reasonable. If two house are in a bad neighborhood, they are likely to be both in poor condition.  
+Another pattern is that Orange and Ventura are not ranked.  
+
+I can use mice to impute the rank for those in Los Angeles. Then I will add NA as 13 and add a feature hasqualityflag. 
+
+## finishedsquarefeet13, finishedsquarefeet6, finishedsquarefeet15, finishedsquarefeet50, finishedsquarefeet12, finishedfloor1squarefeet, calculatedfinishedsquarefeet   
+```{r}
+prop_train %>% 
+  select(finishedsquarefeet13, finishedsquarefeet6, finishedsquarefeet15,
+         finishedsquarefeet50, finishedfloor1squarefeet, 
+         finishedsquarefeet12, calculatedfinishedsquarefeet) %>% 
+  summary()
+```
+
+it seems like **finishedfloor1squarefeet is the same as finishedsquarefeet50** because they have the exact same definition. However the max are different.   
+```{r}
+tmp <- with(prop_train, which(finishedfloor1squarefeet != finishedsquarefeet50))
+prop_train[tmp, c('finishedsquarefeet50','finishedfloor1squarefeet')] %>% 
+  mutate(diff = finishedsquarefeet50 - finishedfloor1squarefeet,
+         ratio_50_to_floor = finishedsquarefeet50/finishedfloor1squarefeet) %>% 
+  summary()
+```
+Since there is only 32 entry that are different from each other and finishedsquarefeet50 is generally 2 fold larger than finishedfloor1squarefeet which suggest a structure pattern. I will just throw out finishedfloorsquarefeet.   
+it seems like **calculatedfinishedsquarefeet is the same as finishedsquarefeet15** because both are defined as total area.  
+```{r}
+with(prop_train, which(calculatedfinishedsquarefeet != finishedsquarefeet15))
+```
+This shows that they have the same values when neither are NA. finishedsquarefeet15 is to be thrown away because majority of it is missing. 
+
+```{r}
+# Check to see if calculatedfinishedsquarefeet is the sum of the 
+# finishedsquarefeet features
+# Get the index of each finishedsquarefeet that is not NA
+tmp13 <- with(prop_train, which(!is.na(finishedsquarefeet13)))
+tmp6 <- with(prop_train, which(!is.na(finishedsquarefeet6)))
+tmp50 <- with(prop_train, which(!is.na(finishedsquarefeet50)))
+tmp12 <- with(prop_train, which(!is.na(finishedsquarefeet12)))
+# Display a few from each 
+prop_train[c(tmp13[1:3], tmp6[1:3], tmp50[1:3], tmp12[1:3]), 
+          c('calculatedfinishedsquarefeet',
+          'finishedsquarefeet13',
+          'finishedsquarefeet6',
+          'finishedsquarefeet50',
+          'finishedsquarefeet12')]
+```
+```{r}
+# Find entry with more than two finishedsquarefeet that are not NA  
+# There are no overlap for 6 and 13 with 12.
+intersect(tmp13, tmp12)
+intersect(tmp6, tmp12)
+intersect(tmp13, tmp6)
+intersect(tmp50, c(tmp13, tmp6))
+# Only 50 has overlap with 12
+intersect(tmp50, tmp12) %>% length()
+
+```
+
+```{r}
+# Are there any NA for calculatedfinishedsquarefeet where
+# finishedsquarefeet aren't  
+intersect(which(is.na(prop_train$calculatedfinishedsquarefeet)),
+          c(tmp6, tmp13, tmp12))
+```
+There are none to help fill in the NA, so gonna just use median
+
+
+```{r}
+rm(tmp13,tmp6,tmp12,tmp50)
+```
+
+
+Doesn't seem useful 
+
+## Basementsqft 
+```{r}
+table(prop_train$basementsqft, useNA = 'always')
+```
+Always all have just one so not useful 
+
+## storytypeid
+```{r}
+table(prop_train$storytypeid, useNA = 'always') %>% .[. > 0]
+```
+There are 35 different levels but only 43 are basement and the rest are NA. No useful. 
+
+## yardbuildingsqft26, yardbuildingsqft17   
+```{r}
+table(prop_train$yardbuildingsqft26, useNA = 'always')
+sum(!is.na(prop_train$yardbuildingsqft26))
+```
+Doesn't seem useful but I can keep it and let the ML decide.   
+
+```{r}
+summary(prop_train$yardbuildingsqft17)
+```
+
+
+## fireplaceflag, fireplacecnt 
+```{r}
+table(prop_train$fireplaceflag, useNA = 'always')
+```
+Fireplaceflag and fireplacecnt should be connected. And it does look like fireplacecnt has ~11% non-NA value. 
+
+```{r}
+table(prop_train$fireplacecnt, useNA = 'always')
+```
+```{r}
+# Verify that count and fireplaceflag are well connected  
+# A true fireplaceflag should also have a count  
+with(prop_train, which(fireplaceflag & !is.na(fireplacecnt)))
+```
+Apparently fireplaceflag and fireplacecnt are disjoined. 
+
+```{r}
+prop_train %>% 
+  group_by(fips) %>% 
+  summarize(flag = sum(fireplaceflag, na.rm = T),
+            cnt = sum(!is.na(fireplacecnt)),
+            cntNA = sum(is.na(fireplacecnt)))
+```
+Looks like only Orange County have flag but no count. So impute using the the most common count which is 1. 
+```{r}
+prop_train %>% 
+  filter(fips == 'Orange') %$%
+  table(fireplacecnt, useNA = 'always') %>% 
+  prop.table()
+```
+
+## architecturalstyletypeid 
+```{r}
+prop_train %$%
+  table(architecturalstyletypeid, useNA = 'always') %>%
+  .[. > 0]
+```
+There are 28 levels including NA. But majority are NA.  
+
+## typeconstructiontypeid  
+```{r}
+prop_train %$%
+  table(typeconstructiontypeid, useNA = 'always')
+```
+Doesn't look useful  
+
+
+
+## decktypeid  
+```{r}
+prop_train$decktypeid %>% table()
+```
+Only one type of deck so can change to just hasdeckflag  
+
+## poolsizesum, pooltypeid10, pooltypeid2, pooltypeid7, poolcnt, hashottuborspa  
+```{r}
+prop_train %>% 
+  select(poolsizesum, pooltypeid10, pooltypeid2, 
+         pooltypeid7, poolcnt, hashottuborspa) %>% 
+  summary()
+```
+Looks like poolcnt doesn't have any information. Convert to just haspool.  
+Looks like hashottuborspa is just the summation of pooltypeid10 and pooltypeid2.  
+
+```{r}
+prop_train %>% 
+  summarise(sizesumN = sum(!is.na(poolsizesum)),
+            pool10 = sum(!is.na(pooltypeid10)),
+            pool2 = sum(!is.na(pooltypeid2)),
+            pool7 = sum(!is.na(pooltypeid7)),
+            poolcnt = sum(!is.na(poolcnt)))
+```
+
+```{r}
+prop_train %$%
+  table(pooltypeid10, pooltypeid2, useNA = 'always')
+```
+
+pooltypeid10 and pooltypeid2 are disjoined.  
+```{r}
+with(prop_train, which(pooltypeid10 & pooltypeid2 & pooltypeid7))
+```
+pooltypeid10, 2, 7 are disjoined  
+```{r}
+## Determine if poolcnt includes pooltypeid10 which is spa/hot tub
+with(prop_train, 
+     which((pooltypeid10 | pooltypeid2 | pooltypeid7) & is.na(poolcnt))) %>% 
+  length()
+```
+Poolcnt only counts for pools. However, poolcnt is reduntant since pool2 and pool7 account for there being a pool.  
+
+## taxdelinquencyyear, taxdelinquencyflag  
+```{r}
+prop_train %$%
+  table(taxdelinquencyflag, taxdelinquencyyear, useNA = 'always')
+```
+Looks like the flag and year are connected. 99 is an odd value   
+
+```{r}
+prop_2016$taxdelinquencyyear %>% table()
+```
+Further investigation shows that 99 is include a possible value and there are quite a few outliers.  
+
+## threequarterbathnbr, fullbathcnt, calculatedbathnbr
+```{r}
+with(prop_train,
+     table(threequarterbathnbr,
+           fullbathcnt, 
+           useNA = 'always'))
+```
+Just convert NA to zero for both features. 
+
+```{r}
+prop_train$calculatedbathnbr %>% summary()
+```
+```{r}
+prop_train %>% 
+  filter(is.na(calculatedbathnbr),
+         is.na(threequarterbathnbr),
+         is.na(fullbathcnt)) %>% 
+  summarize(n = n())
+```
+When one of them are NA then all of them are NA. Convert Na to zero. 
+
+
+
+## numberofstories, unitcnt
+Let's see if numberofstories and unitcnt are correlated such that we can use each other to impute.  
+```{r}
+table(prop_train$numberofstories, useNA = 'always')
+```
+```{r}
+table(prop_train$unitcnt, useNA = 'always')
+```
+
+```{r}
+with(prop_train,
+     table(numberofstories,
+           unitcnt, useNA = 'always'))
+```
+I cannot see any patterns because there are very few entry that has both features.  
+## garagecarcnt, garagetotalsqft  
+```{r}
+prop_train %>% select(garagecarcnt, garagetotalsqft) %>% summary()
+```
+```{r}
+ggplot(prop_train, aes(x = 1, y = garagetotalsqft)) +
+  geom_boxplot()
+```
+```{r}
+# Check to see that garagecarcnt and garagetotalsqft  
+# when one feature is present, the other should be there too
+with(prop_train, which(is.na(garagecarcnt) != is.na(garagetotalsqft))) 
+```
+So just convert NA to zero
+
+## regionidneighborhood, regionidcity, regionidzip, regionidcounty  
+```{r}
+# Determine how granular each regionid contains 
+prop_train %>% 
+  summarize(ncounty = length(unique(regionidcounty)),
+            nacounty = sum(is.na(regionidcounty)),
+            ncity = length(unique(regionidcity)),
+            nacity = sum(is.na(regionidcity)),
+            nneighborhood = length(unique(regionidneighborhood)),
+            naneighborhood = sum(is.na(regionidneighborhood)),
+            nzip = length(unique(regionidzip)),
+            nazip = sum(is.na(regionidzip)))
+```
+location detail: coarse to fine
+county > city > zip > neighborhood
+
+```{r}
+table(prop_train$regionidcounty, prop_train$fips)
+```
+regionidcounty is redudant since fips holds the same information. 
+```{r}
+prop_train$regionidzip %>% table(useNA = 'always') %>% .[. < 35]
+```
+**399675** is not a legit zip code. 
+```{r}
+# Determine the location where zip code 399675 
+tmp <- prop_train %>% 
+  filter(regionidzip == '399675') %>% 
+  summarize(long_min = min(longitude),
+            long_max = max(longitude),
+            lat_min = min(latitude),
+            lat_max = max(latitude))
+
+
+prop_train %>% 
+  filter(longitude > tmp$long_min,
+         longitude < tmp$long_max,
+         latitude > tmp$lat_min,
+         latitude < tmp$lat_max) %>% 
+  ggplot(aes(x = longitude, y = latitude, color = as.factor(regionidzip))) +
+  geom_point() +
+  labs(title = "Figuring out zipcode 399675")
+```
+```{r}
+###### This is on the whole dataset #######
+prop_2016 %>% 
+  filter(regionidzip %in% c('399675', '96270', '96273')) %>% 
+  ggplot(aes(x = longitude, y = latitude, color = as.factor(regionidzip))) +
+  geom_point(alpha = 0.2)
+```
+Yes it is possible that 399675 is not a legit zip code but it doesn't look random so keep it as is.  
+
+
+## heatingorsystemtypeid
+```{r}
+prop_train$heatingorsystemtypeid %>% table(useNA = 'always')
+```
+```{r}
+ggplot(prop_train, 
+       aes(x = longitude, y = latitude, color = is.na(heatingorsystemtypeid))) +
+  geom_point(alpha = 0.2)
+```
+It looks like missing is just none since it don't look like it is random.  
+
+## propertyzoningdesc  
+```{r}
+tmp <- prop_train %>% 
+  group_by(propertyzoningdesc) %>% 
+  summarise(n = n())
+
+summary(tmp)
+```
+The distribution for this featuer is very unbalance and majority only has a few. 
+
+```{r}
+## Counts of counts of the propertyzoningdesc
+table(tmp$n)
+```
+```{r}
+# Determine the percentage of population if I aggregate the minor factors together
+# k was selected out of random.  
+k = 100
+tmp[tmp$n < k,] %>%
+  summarise(nreduced = n(),
+            fraction = sum(n)/nrow(prop_train)*100)
+```
+Factors that occur less than `r k` in the training set is combined into the other category. This is to reduce the number of levels and to prevent overfitting due to limited samples in that level.  
+
+## lotsizesquarefeet 
+```{r}
+prop_train$lotsizesquarefeet %>% summary()
+```
+```{r}
+prop_train$lotsizesquarefeet %>% boxplot()
+```
+Definitely a lot of outliers  
+
+```{r}
+## There are too many outliers for lotsizesquare feet.
+
+prop_train %>% 
+  filter(lotsizesquarefeet < 2000000,
+         calculatedfinishedsquarefeet > 100) %>% 
+  ggplot(aes(calculatedfinishedsquarefeet, lotsizesquarefeet)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth() +
+  geom_abline(slope = 1, color = "red") +
+  scale_x_log10() +
+  scale_y_log10() +
+  coord_cartesian(xlim = c(100, 10000))
+```
+There doesn't look like a linear relationship between calcualtedfinishedsquarefeet and lotsizesquarefeet.  
+
+## yearbuilt 
+```{r}
+prop_train %>% 
+  group_by(yearbuilt) %>% 
+  summarize(count = n()) %>% 
+  ggplot(aes(x = yearbuilt, y = count)) +
+  geom_line() +
+  geom_point(alpha = 0.2)
+```
+```{r}
+ggplot(prop_train, aes(x= longitude, y = latitude, color = is.na(yearbuilt))) +
+  geom_point() +
+  labs(title = "Missing year looks random")
+```
+
+```{r}
+## Looking closely at a random area on the map
+prop_train %>% 
+  filter(longitude < -118.5,
+         longitude > -118.6,
+         latitude < 34.4,
+         latitude > 34.0) %>% 
+  ggplot(aes(x= longitude, y = latitude, color = factor(yearbuilt))) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Are neighboring property built the same year?")
+```
+It doesn't look like there is a strong correlation between property built year with neighboring properties. Certain areas are true, but there are many that aren't. 
+
+However, only a small proportion of properties are missing their year. 
+
+## censustractandblock, rawcensustractandblock  
+both of these features has the same definition in the data dictionary but censustractandblock is missing a few so it can be thrown out since information is redundant.  
+
+## structuretaxvaluedollarcnt  
+```{r}
+prop_train$structuretaxvaluedollarcnt %>% summary()
+```
+```{r}
+# check if there is a pattern like back to back NA
+# which(is.na(prop_train$structuretaxvaluedollarcnt)) %>% diff()
+# None
+```
+
+```{r}
+# Check to see if it is location based
+prop_train %>%
+  filter(is.na(structuretaxvaluedollarcnt)) %>% 
+  ggplot(aes(x= longitude, 
+           y = latitude)) +
+  geom_point() +
+  labs(title = 'Missing StructureTaxValueDollarcnt')
+```
+The NA looks random.  
+
+```{r}
+ggplot(prop_train, 
+       aes(x = longitude, 
+           y = latitude, 
+           color = log(structuretaxvaluedollarcnt))) +
+  geom_point(alpha = .8, size = 0.5)
+```
+
+```{r}
+hist(log(prop_train$structuretaxvaluedollarcnt))
+```
+Convert missing values with just the median. Only 378 are missing which is a very small proportion.  
+
+## propertycountylandusecode
+```{r}
+prop_train$propertycountylandusecode %>% 
+  table() %>%
+  prop.table() %>%
+  `*`(100) %>% 
+  round(digits = 1) %>%
+  sort()
+```
+
+
+# Export
+```{r}
+# Renaming prop_2017 which is really the csv properties_2017.csv
+# prop_2017 <- prop_2016
+# rm(prop_2016)
+# save(prop_2017,sample_sub, sample_sub_dates, train_2016, train_2017, map_loc, file = 'data/raw_data.RData')
+```
+

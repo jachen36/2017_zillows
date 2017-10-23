@@ -1,0 +1,84 @@
+---
+title: "understanding the difference between properties 2016 and 2017"
+author: "Jacinto"
+date: "October 9, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(data.table)
+```
+
+
+```{r}
+prop_2016 <- read_csv("data/properties_2016.csv",
+                      # col_types, every 5 cols
+                      col_types = paste0('iccid','dccdc',
+                                         'idiii', 'iicii',
+                                         'iilci','idiil',
+                                         'llccc','ccccc',
+                                         'dcici','iidil',
+                                         'ddidd','cic'))
+
+
+prop_2017 <- read_csv("data/properties_2016.csv",
+                      # col_types, every 5 cols
+                      col_types = paste0('iccid','dccdc',
+                                         'idiii', 'iicii',
+                                         'iilci','idiil',
+                                         'llccc','ccccc',
+                                         'dcici','iidil',
+                                         'ddidd','cic'))
+```
+
+
+
+
+```{r}
+object.size(prop_2016)
+object.size(prop_2017)
+# Same 
+dim(prop_2016)
+dim(prop_2017)
+```
+
+
+```{r}
+prop_2016 <- as.data.table(prop_2016)
+prop_2017 <- as.data.table(prop_2017)
+tmp <- all.equal(prop_2016, prop_2017)
+# It looks like it is the same
+tmp
+```
+
+```{r}
+tmp <- which(prop_2016 != prop_2017, arr.ind = TRUE)
+tmp
+```
+
+It really is the case that prop_2017 is just prop_2016 with maybe some features updated or a few houses sold in 2017.
+
+Need deeper dive, but they do seem to be the same
+
+```{r}
+train_2016 <- read_csv("data/train_2016_v2.csv",
+                       col_types = 'cnD')
+train_2017 <- read_csv("data/train_2017.csv",
+                       col_types = 'cnD')
+dim(train_2016)
+dim(train_2017)
+```
+```{r}
+setdiff(train_2016$parcelid, train_2017$parcelid) %>% length()
+```
+```{r}
+setdiff(train_2017$parcelid, train_2016$parcelid) %>% length()
+```
+There are 2553 same parcelid  
+
+
